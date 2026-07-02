@@ -411,7 +411,6 @@ def calculer_kpi(acteurs, pharmacie):
                 "nom":       a["nom"],
                 "categorie": LABELS[a["categorie"]],
                 "distance":  a["distance_km"],
-                "score":     a["score"],
                 "contact":   a.get("contact", ""),
             }
             for a in acteurs[:5]
@@ -483,19 +482,18 @@ def generer_carte(pharmacie, acteurs, kpi):
                 {a.get('adresse','')}<br>
                 <span style="color:{color}">■ {LABELS[cat]}</span><br>
                 Distance : <b>{a['distance_km']} km</b><br>
-                Score priorité : <b>{a['score']}/10</b><br>
                 Source : {a.get('source','')}<br>
                 {"Contact : " + a['contact'] if a.get('contact') else ""}
             """
             folium.CircleMarker(
                 location=[a["latitude"], a["longitude"]],
-                radius=7 + a["score"] * 0.4,   # taille proportionnelle au score
+                radius=7,
                 color=color,
                 fill=True,
                 fill_color=color,
                 fill_opacity=0.75,
                 popup=folium.Popup(popup_html, max_width=260),
-                tooltip=f"{ICONES.get(cat,'')} {a['nom']} — Score {a['score']} — {a['distance_km']} km",
+                tooltip=f"{ICONES.get(cat,'')} {a['nom']} — {a['distance_km']} km",
             ).add_to(cluster)
 
     legend_items = []
@@ -536,7 +534,6 @@ def exporter_csv(acteurs, pharmacie, kpi):
             "acteur_adresse":        a.get("adresse", ""),
             "acteur_contact":        a.get("contact", ""),
             "distance_km":           a["distance_km"],
-            "score_priorite":        a["score"],
             "source":                a.get("source", ""),
             "siret":                 a.get("siret", ""),
             "date_scan":             kpi["date_scan"],
@@ -566,7 +563,7 @@ def afficher_resume(acteurs, kpi):
     print("╠══════════════════════════════════════════════════════╣")
     print("║  TOP 5 ACTEURS PRIORITAIRES                          ║")
     for i, a in enumerate(kpi["top5_prioritaires"], 1):
-        ligne = f"{i}. {a['nom'][:30]} ({a['distance']:.2f}km — score {a['score']})"
+        ligne = f"{i}. {a['nom'][:30]} ({a['distance']:.2f}km)"
         print(f"║  {ligne:52s}  ║")
     print("╚══════════════════════════════════════════════════════╝\n")
 
