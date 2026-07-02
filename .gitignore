@@ -1,0 +1,12 @@
+# Private or generated data
+pharmadeliv_pharmacies_clean.csv
+cpts_hubspot.csv
+*.csv
+
+# Generated outputs
+mapping_ecosysteme.html
+acteurs_identifies.csv
+kpi_ecosysteme.json
+
+# Local environment
+.env

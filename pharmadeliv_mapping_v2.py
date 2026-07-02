@@ -13,6 +13,7 @@ Usage :
 """
 
 import math
+import os
 import time
 import json
 import pandas as pd
@@ -24,11 +25,11 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 # CONFIG GÉNÉRALE
 # ─────────────────────────────────────────────
-CSV_PHARMACIES = "pharmadeliv_pharmacies_clean.csv"
-CSV_CPTS       = "cpts_hubspot.csv"       # export HubSpot avec colonnes : nom, adresse, latitude, longitude, contact, territoire
-OUTPUT_MAP     = "mapping_ecosysteme.html"
-OUTPUT_CSV     = "acteurs_identifies.csv"
-OUTPUT_KPI     = "kpi_ecosysteme.json"
+CSV_PHARMACIES = os.getenv("PHARMADELIV_PHARMACIES_CSV", "pharmadeliv_pharmacies_clean.csv")
+CSV_CPTS       = os.getenv("PHARMADELIV_CPTS_CSV", "cpts_hubspot.csv")
+OUTPUT_MAP     = os.getenv("PHARMADELIV_OUTPUT_MAP", "mapping_ecosysteme.html")
+OUTPUT_CSV     = os.getenv("PHARMADELIV_OUTPUT_CSV", "acteurs_identifies.csv")
+OUTPUT_KPI     = os.getenv("PHARMADELIV_OUTPUT_KPI", "kpi_ecosysteme.json")
 
 # ── Rayons par catégorie (conforme cadrage §4)
 RAYONS_KM = {
@@ -95,6 +96,11 @@ ICONES = {
 # 1. CHARGEMENT & SÉLECTION DE LA PHARMACIE
 # ─────────────────────────────────────────────
 def charger_pharmacies():
+    if not os.path.exists(CSV_PHARMACIES):
+        raise FileNotFoundError(
+            f"Fichier de pharmacies introuvable : {CSV_PHARMACIES}. "
+            "Placez-le hors du dépôt ou définissez la variable d’environnement PHARMADELIV_PHARMACIES_CSV."
+        )
     df = pd.read_csv(CSV_PHARMACIES)
     df = df.dropna(subset=["latitude", "longitude"])
     return df
