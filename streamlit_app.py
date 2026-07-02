@@ -97,10 +97,6 @@ if selected_pharmacie is not None:
         expander = st.expander("Détails KPI")
         expander.json(kpi)
 
-        st.markdown("### Top 10 acteurs prioritaires")
-        df_top = pd.DataFrame(kpi["top5_prioritaires"])
-        st.dataframe(df_top, use_container_width=True)
-
         st.markdown("### Tableau complet des acteurs")
         df_acteurs = pd.DataFrame(acteurs)
         st.dataframe(df_acteurs, use_container_width=True)
