@@ -99,6 +99,8 @@ if selected_pharmacie is not None:
 
         st.markdown("### Tableau complet des acteurs")
         df_acteurs = pd.DataFrame(acteurs)
+        if "score" in df_acteurs.columns:
+            df_acteurs = df_acteurs.drop(columns=["score"])
         st.dataframe(df_acteurs, use_container_width=True)
 
         st.markdown("### Carte interactive")
