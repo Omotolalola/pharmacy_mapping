@@ -83,13 +83,13 @@ LABELS = {
 }
 
 ICONES = {
-    "cabinet": "🩺",
-    "idel":    "💉",
-    "ehpad":   "🏥",
-    "ssiad":   "🤝",
-    "ccas":    "🏛️",
-    "asso":    "👥",
-    "cpts":    "🔗",
+    "cabinet": "Cabinet",
+    "idel":    "IDEL",
+    "ehpad":   "EHPAD",
+    "ssiad":   "SSIAD",
+    "ccas":    "CCAS",
+    "asso":    "Association",
+    "cpts":    "CPTS",
 }
 
 # ─────────────────────────────────────────────
@@ -164,6 +164,22 @@ def calculer_score(categorie, distance_km, rayon_max):
     return round(base + dist_score, 1)
 
 # ─────────────────────────────────────────────
+# 3bis. JOURNAL DES ERREURS DE SCAN
+# Alimenté par les fonctions de scan ci-dessous, remis à zéro au début
+# de chaque scanner_ecosysteme(). Permet à l'interface Streamlit d'afficher
+# les erreurs API au lieu qu'elles ne restent invisibles dans la console.
+# ─────────────────────────────────────────────
+_SCAN_LOGS = []
+
+def _log(message):
+    _SCAN_LOGS.append(message)
+    print(f"    {message}")
+
+def dernier_scan_logs():
+    """Retourne les messages (avertissements/erreurs) du dernier scan."""
+    return list(_SCAN_LOGS)
+
+# ─────────────────────────────────────────────
 # 4. SCAN SIRENE
 # ─────────────────────────────────────────────
 def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
@@ -176,12 +192,25 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
         params = {
             "activite_principale": naf_code,
             "departement": str(departement).zfill(2),
-            "per_page": 100,
+            "per_page": 25,
             "page": page,
         }
         try:
             resp = requests.get(url, params=params, timeout=10)
+
+            # Rate-limiting (429) : l'API gouv limite le nombre de requêtes
+            # par minute. On patiente puis on retente 2 fois avant d'abandonner
+            # cette catégorie, plutôt que de silencieusement retourner 0 résultat.
+            retries = 0
+            while resp.status_code == 429 and retries < 3:
+                wait = 2 * (retries + 1)
+                _log(f"HTTP 429 (rate-limit) sur {naf_code}, nouvelle tentative dans {wait}s...")
+                time.sleep(wait)
+                resp = requests.get(url, params=params, timeout=10)
+                retries += 1
+
             if resp.status_code != 200:
+                _log(f"Erreur SIRENE ({naf_code}) : HTTP {resp.status_code} — {resp.text[:150]}")
                 break
             data    = resp.json()
             results = data.get("results", [])
@@ -220,16 +249,18 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
             if page >= data.get("total_pages", 1):
                 break
             page += 1
-            time.sleep(0.1)
+            time.sleep(0.3)
 
         except Exception as e:
-            print(f"    ⚠ Erreur SIRENE ({naf_code}) : {e}")
+            _log(f"Erreur SIRENE ({naf_code}) : {e}")
             break
 
     if non_diffusibles:
-        print(f"    ℹ {non_diffusibles} établissement(s) non-diffusible(s) (RGPD) ignoré(s) pour {naf_code}")
+        print(f"    {non_diffusibles} etablissement(s) non-diffusible(s) (RGPD) ignores pour {naf_code}")
 
     return acteurs
+
+
 
 # ─────────────────────────────────────────────
 # 5. SCAN ASSOCIATIONS (RNA)
@@ -249,12 +280,21 @@ def scanner_rna(lat, lon, departement, rayon_km):
                 "q": mot,
                 "departement": str(departement).zfill(2),
                 "est_association": "true",
-                "per_page": 100,
+                "per_page": 25,
                 "page": 1,
             }
             resp = requests.get(url, params=params, timeout=10)
+
+            retries = 0
+            while resp.status_code == 429 and retries < 3:
+                wait = 2 * (retries + 1)
+                _log(f"HTTP 429 (rate-limit) sur RNA/{mot}, nouvelle tentative dans {wait}s...")
+                time.sleep(wait)
+                resp = requests.get(url, params=params, timeout=10)
+                retries += 1
+
             if resp.status_code != 200:
-                print(f"    ⚠ Erreur RNA ({mot}) : HTTP {resp.status_code}")
+                _log(f"Erreur RNA ({mot}) : HTTP {resp.status_code} — {resp.text[:150]}")
                 continue
             for r in resp.json().get("results", []):
                 siege = r.get("siege", {})
@@ -280,9 +320,9 @@ def scanner_rna(lat, lon, departement, rayon_km):
                         "contact":     "",
                         "source":      "RNA (via Recherche d'Entreprises)",
                     })
-            time.sleep(0.2)
+            time.sleep(0.3)
         except Exception as e:
-            print(f"    ⚠ Erreur RNA ({mot}) : {e}")
+            _log(f"Erreur RNA ({mot}) : {e}")
 
     return acteurs
 
@@ -310,9 +350,9 @@ def charger_cpts(lat, lon, rayon_km):
                     "contact":     row.get("contact", ""),
                     "source":      "HubSpot CRM",
                 })
-        print(f"    ✓ {len(acteurs)} CPTS trouvée(s) dans le rayon")
+        print(f"    {len(acteurs)} CPTS trouvée(s) dans le rayon")
     except FileNotFoundError:
-        print(f"    ⚠ Fichier {CSV_CPTS} introuvable — CPTS ignorées")
+        print(f"    Fichier {CSV_CPTS} introuvable — CPTS ignorées")
         print(f"      → Exporte ta base HubSpot en CSV avec : nom, adresse, latitude, longitude, contact")
     return acteurs
 
@@ -325,6 +365,8 @@ def scanner_ecosysteme(pharmacie):
             "Pipeline réservé aux pharmacies partenaires : 'accepte_commandes' doit être True."
         )
 
+    _SCAN_LOGS.clear()
+
     lat  = pharmacie["latitude"]
     lon  = pharmacie["longitude"]
     dept = str(pharmacie["num_departement"]).zfill(2)
@@ -335,7 +377,7 @@ def scanner_ecosysteme(pharmacie):
     # SIRENE
     for cat, codes in NAF_CODES.items():
         rayon = RAYONS_KM[cat]
-        print(f"  {ICONES[cat]} {LABELS[cat]} (rayon {rayon} km)...")
+        print(f"  {LABELS[cat]} (rayon {rayon} km)...")
         for naf in codes:
             acteurs = scanner_sirene(lat, lon, naf, dept, rayon)
             for a in acteurs:
@@ -346,7 +388,7 @@ def scanner_ecosysteme(pharmacie):
 
     # RNA
     rayon_asso = RAYONS_KM["asso"]
-    print(f"  {ICONES['asso']} {LABELS['asso']} (rayon {rayon_asso} km)...")
+    print(f"  {LABELS['asso']} (rayon {rayon_asso} km)...")
     assos = scanner_rna(lat, lon, dept, rayon_asso)
     for a in assos:
         a["categorie"] = "asso"
@@ -356,7 +398,7 @@ def scanner_ecosysteme(pharmacie):
 
     # CPTS (HubSpot)
     rayon_cpts = RAYONS_KM["cpts"]
-    print(f"  {ICONES['cpts']} {LABELS['cpts']} (rayon {rayon_cpts} km — base HubSpot)...")
+    print(f"  {LABELS['cpts']} (rayon {rayon_cpts} km — base HubSpot)...")
     cpts = charger_cpts(lat, lon, rayon_cpts)
     for a in cpts:
         a["categorie"] = "cpts"
@@ -374,8 +416,8 @@ def scanner_ecosysteme(pharmacie):
 
     # Tri par score décroissant
     uniques.sort(key=lambda x: -x["score"])
-    print(f"\n✓ {len(uniques)} acteurs uniques identifiés.")
-    return uniques
+    print(f"\n{len(uniques)} acteurs uniques identifiés.")
+    return uniques, list(_SCAN_LOGS)
 
 # ─────────────────────────────────────────────
 # 8. INDICATEURS DE SUCCÈS (cadrage §6)
@@ -578,7 +620,11 @@ def afficher_resume(acteurs, kpi):
 if __name__ == "__main__":
     df_pharmacies = charger_pharmacies()
     pharmacie     = choisir_pharmacie(df_pharmacies)
-    acteurs       = scanner_ecosysteme(pharmacie)
+    acteurs, logs = scanner_ecosysteme(pharmacie)
+    if logs:
+        print("\n⚠ Avertissements pendant le scan :")
+        for l in logs:
+            print(f"  - {l}")
     kpi           = calculer_kpi(acteurs, pharmacie)
     afficher_resume(acteurs, kpi)
     generer_carte(pharmacie, acteurs, kpi)

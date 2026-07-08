@@ -27,36 +27,37 @@ def load_pharmacies() -> pd.DataFrame:
     return charger_pharmacies()
 
 @st.cache_data(show_spinner=False, ttl=86400)
-def cached_scanner_ecosysteme(pharmacie_data: dict) -> list:
+def cached_scanner_ecosysteme(pharmacie_data: dict):
     return scanner_ecosysteme(pharmacie_data)
 
 pharmacies = load_pharmacies()
 
 with st.sidebar:
-    st.header("Recherche de pharmacie")
+    st.header("Recherche de pharmacie partenaire")
     query = st.text_input("Nom ou ville", placeholder="Exemple : Paris, Pharmacie Dupont")
-    filtrer_partenaire = st.checkbox(
-        "Afficher uniquement les pharmacies déjà associées à Pharmadeliv",
-        value=True,
-        help="Réduit le nombre de pharmacies affichées et votre temps de sélection en ciblant uniquement les partenaires.",
-    )
 
-    filtered_pharmacies = pharmacies
-    if filtrer_partenaire:
-        filtered_pharmacies = filtered_pharmacies[filtered_pharmacies["accepte_commandes"] == True]
+    # On ne travaille QUE sur les pharmacies déjà partenaires Pharmadeliv.
+    # (cast explicite en bool pour éviter tout souci si le CSV est un jour
+    # régénéré avec des valeurs "True"/"False" en texte ou 0/1)
+    partenaires = pharmacies[pharmacies["accepte_commandes"].astype(bool) == True]
 
+    resultats = partenaires
     if query:
-        resultats = filtered_pharmacies[
-            filtered_pharmacies["nom"].str.contains(query, case=False, na=False)
-            | filtered_pharmacies["ville"].str.contains(query, case=False, na=False)
+        resultats = resultats[
+            resultats["nom"].str.contains(query, case=False, na=False)
+            | resultats["ville"].str.contains(query, case=False, na=False)
         ]
-    else:
-        resultats = filtered_pharmacies.copy()
-
-    st.write(f"{len(resultats)} résultat(s) trouvés")
 
     if resultats.empty:
-        st.info("Aucun résultat à afficher. Essaye un autre terme de recherche.")
+        if query:
+            st.info(
+                f"Aucune pharmacie **partenaire** ne correspond à « {query} ». "
+                "Rappel : seules les pharmacies déjà partenaires Pharmadeliv sont proposées ici."
+            )
+            with st.expander("Voir les villes où Pharmadeliv a des pharmacies partenaires"):
+                st.write(sorted(partenaires["ville"].unique().tolist()))
+        else:
+            st.warning("Aucune pharmacie partenaire trouvée dans le fichier chargé.")
         selected_pharmacie = None
     else:
         preview = resultats[["nom", "ville", "departement", "adresse_complete", "accepte_commandes"]].copy()
@@ -86,23 +87,29 @@ with st.sidebar:
 
 if selected_pharmacie is not None:
     st.sidebar.success(f"Pharmacie sélectionnée : {selected_pharmacie['nom']}")
-    partenaire = bool(selected_pharmacie.get("accepte_commandes") is True)
 
-    if not partenaire:
-        st.sidebar.warning(
-            "Le pipeline est réservé aux pharmacies partenaires."
-            " Sélectionne une pharmacie avec 'accepte_commandes' == True."
-        )
-
-    if st.sidebar.button("Générer le mapping", disabled=not partenaire):
+    if st.sidebar.button("Générer le mapping"):
         with st.spinner("Scan de l'écosystème en cours..."):
             pharmacie_data = selected_pharmacie.to_dict()
-            acteurs = cached_scanner_ecosysteme(pharmacie_data)
+            acteurs, scan_logs = cached_scanner_ecosysteme(pharmacie_data)
             kpi = calculer_kpi(acteurs, selected_pharmacie)
             generer_carte(selected_pharmacie, acteurs, kpi)
             exporter_csv(acteurs, selected_pharmacie, kpi)
 
         st.markdown("## Résultats du scan")
+
+        if scan_logs:
+            with st.expander(f"⚠ {len(scan_logs)} avertissement(s) pendant le scan", expanded=(kpi["nb_acteurs_total"] == 0)):
+                for l in scan_logs:
+                    st.write(f"- {l}")
+
+        if kpi["nb_acteurs_total"] == 0:
+            st.warning(
+                "Aucun acteur trouvé autour de cette pharmacie. Regarde le détail des "
+                "avertissements ci-dessus : c'est très probablement un HTTP 429 "
+                "(rate-limit de l'API recherche-entreprises.api.gouv.fr) si tu as lancé "
+                "plusieurs scans à la suite. Dans ce cas, attends 1 à 2 minutes et relance."
+            )
 
         metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
         metrics_col1.metric("Acteurs identifiés", kpi["nb_acteurs_total"])
