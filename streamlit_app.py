@@ -24,7 +24,16 @@ st.write(
 
 @st.cache_data
 def load_pharmacies() -> pd.DataFrame:
-    return charger_pharmacies()
+    df = charger_pharmacies()
+    if "accepte_commandes" in df.columns:
+        df["accepte_commandes"] = (
+            df["accepte_commandes"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["true", "1", "yes", "y"])
+        )
+    return df
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def cached_scanner_ecosysteme(pharmacie_data: dict):
