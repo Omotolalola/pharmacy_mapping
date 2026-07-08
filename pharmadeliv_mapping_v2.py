@@ -176,7 +176,7 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
         params = {
             "activite_principale": naf_code,
             "departement": str(departement).zfill(2),
-            "per_page": 25,
+            "per_page": 100,
             "page": page,
         }
         try:
@@ -220,7 +220,7 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
             if page >= data.get("total_pages", 1):
                 break
             page += 1
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         except Exception as e:
             print(f"    ⚠ Erreur SIRENE ({naf_code}) : {e}")
@@ -249,7 +249,7 @@ def scanner_rna(lat, lon, departement, rayon_km):
                 "q": mot,
                 "departement": str(departement).zfill(2),
                 "est_association": "true",
-                "per_page": 25,
+                "per_page": 100,
                 "page": 1,
             }
             resp = requests.get(url, params=params, timeout=10)
@@ -320,6 +320,11 @@ def charger_cpts(lat, lon, rayon_km):
 # 7. SCAN COMPLET ÉCOSYSTÈME
 # ─────────────────────────────────────────────
 def scanner_ecosysteme(pharmacie):
+    if not pharmacie.get("accepte_commandes"):
+        raise ValueError(
+            "Pipeline réservé aux pharmacies partenaires : 'accepte_commandes' doit être True."
+        )
+
     lat  = pharmacie["latitude"]
     lon  = pharmacie["longitude"]
     dept = str(pharmacie["num_departement"]).zfill(2)

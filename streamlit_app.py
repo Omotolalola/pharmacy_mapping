@@ -26,23 +26,32 @@ st.write(
 def load_pharmacies() -> pd.DataFrame:
     return charger_pharmacies()
 
+@st.cache_data(show_spinner=False, ttl=86400)
+def cached_scanner_ecosysteme(pharmacie_data: dict) -> list:
+    return scanner_ecosysteme(pharmacie_data)
+
 pharmacies = load_pharmacies()
 
 with st.sidebar:
     st.header("Recherche de pharmacie")
     query = st.text_input("Nom ou ville", placeholder="Exemple : Paris, Pharmacie Dupont")
-    filtrer_partenaire = st.checkbox("Afficher uniquement les pharmacies déjà associées à Pharmadeliv", value=True)
+    filtrer_partenaire = st.checkbox(
+        "Afficher uniquement les pharmacies déjà associées à Pharmadeliv",
+        value=True,
+        help="Réduit le nombre de pharmacies affichées et votre temps de sélection en ciblant uniquement les partenaires.",
+    )
+
+    filtered_pharmacies = pharmacies
+    if filtrer_partenaire:
+        filtered_pharmacies = filtered_pharmacies[filtered_pharmacies["accepte_commandes"] == True]
 
     if query:
-        resultats = pharmacies[
-            pharmacies["nom"].str.contains(query, case=False, na=False)
-            | pharmacies["ville"].str.contains(query, case=False, na=False)
+        resultats = filtered_pharmacies[
+            filtered_pharmacies["nom"].str.contains(query, case=False, na=False)
+            | filtered_pharmacies["ville"].str.contains(query, case=False, na=False)
         ]
     else:
-        resultats = pharmacies.copy()
-
-    if filtrer_partenaire:
-        resultats = resultats[resultats["accepte_commandes"] == True]
+        resultats = filtered_pharmacies.copy()
 
     st.write(f"{len(resultats)} résultat(s) trouvés")
 
@@ -77,15 +86,21 @@ with st.sidebar:
 
 if selected_pharmacie is not None:
     st.sidebar.success(f"Pharmacie sélectionnée : {selected_pharmacie['nom']}")
+    partenaire = bool(selected_pharmacie.get("accepte_commandes") is True)
 
-    if st.sidebar.button("Générer le mapping"):
+    if not partenaire:
+        st.sidebar.warning(
+            "Le pipeline est réservé aux pharmacies partenaires."
+            " Sélectionne une pharmacie avec 'accepte_commandes' == True."
+        )
+
+    if st.sidebar.button("Générer le mapping", disabled=not partenaire):
         with st.spinner("Scan de l'écosystème en cours..."):
-            acteurs = scanner_ecosysteme(selected_pharmacie)
+            pharmacie_data = selected_pharmacie.to_dict()
+            acteurs = cached_scanner_ecosysteme(pharmacie_data)
             kpi = calculer_kpi(acteurs, selected_pharmacie)
             generer_carte(selected_pharmacie, acteurs, kpi)
             exporter_csv(acteurs, selected_pharmacie, kpi)
-
-        st.success("Mapping généré avec succès !")
 
         st.markdown("## Résultats du scan")
 
