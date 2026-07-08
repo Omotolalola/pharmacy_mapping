@@ -41,6 +41,7 @@ def cached_scanner_ecosysteme(pharmacie_data: dict):
 
 pharmacies = load_pharmacies()
 
+
 with st.sidebar:
     st.header("Recherche de pharmacie partenaire")
     query = st.text_input("Nom ou ville", placeholder="Exemple : Paris, Pharmacie Dupont")
