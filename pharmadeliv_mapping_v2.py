@@ -31,6 +31,20 @@ OUTPUT_MAP     = os.getenv("PHARMADELIV_OUTPUT_MAP", "mapping_ecosysteme.html")
 OUTPUT_CSV     = os.getenv("PHARMADELIV_OUTPUT_CSV", "acteurs_identifies.csv")
 OUTPUT_KPI     = os.getenv("PHARMADELIV_OUTPUT_KPI", "kpi_ecosysteme.json")
 
+# ── Enrichissement contact (téléphone / site web / email)
+# SIRENE/RNA ne fournissent JAMAIS ces informations (registres légaux Insee,
+# pas des annuaires). Deux sources complémentaires, appliquées uniquement
+# aux acteurs les plus prioritaires (score le plus élevé) :
+#   1. OpenStreetMap (Overpass API) — gratuit, sans clé, actif par défaut,
+#      mais couverture partielle (dépend des contributions communautaires).
+#   2. Google Places — payant à l'usage, meilleure couverture, complète
+#      uniquement les acteurs encore sans téléphone après OSM. Inactif tant
+#      que GOOGLE_PLACES_API_KEY n'est pas configurée.
+OSM_MAX_ACTEURS          = int(os.getenv("OSM_MAX_ACTEURS", "30"))
+OSM_RAYON_RECHERCHE_M    = int(os.getenv("OSM_RAYON_RECHERCHE_M", "120"))
+GOOGLE_PLACES_API_KEY    = os.getenv("GOOGLE_PLACES_API_KEY", "")
+GOOGLE_PLACES_MAX_ACTEURS = int(os.getenv("GOOGLE_PLACES_MAX_ACTEURS", "30"))
+
 # ── Rayons par catégorie (conforme cadrage §4)
 RAYONS_KM = {
     "cabinet":  2.5,
@@ -163,6 +177,46 @@ def calculer_score(categorie, distance_km, rayon_max):
     dist_score = max(0, 5 * (1 - distance_km / rayon_max))
     return round(base + dist_score, 1)
 
+
+def extraire_siren(siret):
+    if not siret:
+        return ""
+    s = str(siret).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits[:9] if len(digits) >= 9 else ""
+
+_debug_dump_fait = set()  # évite de spammer les logs : 1 dump JSON brut par NAF/mot-clé
+
+def extraire_siret(r, siege):
+    """Essaie plusieurs emplacements possibles pour le SIRET dans la réponse
+    de recherche-entreprises.api.gouv.fr, car son schéma a pu évoluer."""
+    candidats = [
+        siege.get("siret"),
+        r.get("siret"),
+        r.get("siege_siret"),
+    ]
+    matching = r.get("matching_etablissements") or []
+    if matching and isinstance(matching, list):
+        candidats.append(matching[0].get("siret"))
+    for c in candidats:
+        if c:
+            return str(c)
+    return ""
+
+def _debug_dump_resultat(tag, r):
+    """En mode debug (PHARMADELIV_DEBUG=1), journalise une fois par
+    catégorie/mot-clé la structure JSON brute du premier résultat reçu,
+    pour diagnostiquer précisément quels champs l'API renvoie vraiment."""
+    debug = os.getenv("PHARMADELIV_DEBUG", "") in ("1", "true", "True")
+    if not debug or tag in _debug_dump_fait:
+        return
+    _debug_dump_fait.add(tag)
+    _log(f"[DEBUG {tag}] clés de premier niveau : {sorted(r.keys())}")
+    siege = r.get("siege", {})
+    if isinstance(siege, dict):
+        _log(f"[DEBUG {tag}] clés de 'siege' : {sorted(siege.keys())}")
+    _log(f"[DEBUG {tag}] extrait brut : {json.dumps(r, ensure_ascii=False)[:500]}")
+
 # ─────────────────────────────────────────────
 # 3bis. JOURNAL DES ERREURS DE SCAN
 # Alimenté par les fonctions de scan ci-dessous, remis à zéro au début
@@ -234,15 +288,23 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
                     continue
                 dist = haversine(lat, lon, lat2, lon2)
                 if dist <= rayon_km:
+                    _debug_dump_resultat(f"SIRENE/{naf_code}", r)
+                    siret = extraire_siret(r, siege)
+                    telephone = siege.get("telephone", "")
+                    email = siege.get("email", "")
+                    siren = r.get("siren") or extraire_siren(siret)
                     acteurs.append({
                         "nom":         r.get("nom_complet", ""),
                         "adresse":     siege.get("adresse", ""),
                         "latitude":    lat2,
                         "longitude":   lon2,
                         "distance_km": dist,
-                        "siret":       r.get("siret", ""),
+                        "siret":       siret,
+                        "siren":       siren,
                         "naf":         naf_code,
                         "contact":     "",
+                        "telephone":   telephone,
+                        "email":       email,
                         "source":      "SIRENE",
                     })
 
@@ -309,15 +371,22 @@ def scanner_rna(lat, lon, departement, rayon_km):
                     continue  # établissement non-diffusible
                 dist = haversine(lat, lon, lat2, lon2)
                 if dist <= rayon_km:
+                    _debug_dump_resultat(f"RNA/{mot}", r)
+                    siret = extraire_siret(r, siege)
+                    telephone = siege.get("telephone", "")
+                    email = siege.get("email", "")
+                    siren = r.get("siren") or extraire_siren(siret)
                     acteurs.append({
                         "nom":         r.get("nom_complet", ""),
                         "adresse":     siege.get("adresse", ""),
                         "latitude":    lat2,
                         "longitude":   lon2,
                         "distance_km": dist,
-                        "siret":       r.get("siret", ""),
+                        "siret":       siret,
+                        "siren":       siren,
                         "naf":         "asso",
-                        "contact":     "",
+                        "telephone":   telephone,
+                        "email":       email,
                         "source":      "RNA (via Recherche d'Entreprises)",
                     })
             time.sleep(0.3)
@@ -329,7 +398,7 @@ def scanner_rna(lat, lon, departement, rayon_km):
 # ─────────────────────────────────────────────
 # 6. CHARGEMENT CPTS (base HubSpot interne)
 # Le fichier cpts_hubspot.csv doit contenir :
-# nom, adresse, latitude, longitude, contact, territoire
+# nom, adresse, latitude, longitude, contact, telephone, email, territoire
 # ─────────────────────────────────────────────
 def charger_cpts(lat, lon, rayon_km):
     acteurs = []
@@ -339,21 +408,211 @@ def charger_cpts(lat, lon, rayon_km):
         for _, row in df.iterrows():
             dist = haversine(lat, lon, float(row["latitude"]), float(row["longitude"]))
             if dist <= rayon_km:
+                siret = row.get("siret", "")
+                telephone = row.get("telephone", "")
+                email = row.get("email", "")
                 acteurs.append({
                     "nom":         row.get("nom", ""),
                     "adresse":     row.get("adresse", ""),
                     "latitude":    float(row["latitude"]),
                     "longitude":   float(row["longitude"]),
                     "distance_km": dist,
-                    "siret":       row.get("siret", ""),
+                    "siret":       siret,
+                    "siren":       extraire_siren(siret),
                     "naf":         "cpts",
-                    "contact":     row.get("contact", ""),
+                    "contact":     telephone or email or row.get("contact", ""),
+                    "telephone":   telephone,
+                    "email":       email,
                     "source":      "HubSpot CRM",
                 })
         print(f"    {len(acteurs)} CPTS trouvée(s) dans le rayon")
     except FileNotFoundError:
         print(f"    Fichier {CSV_CPTS} introuvable — CPTS ignorées")
         print(f"      → Exporte ta base HubSpot en CSV avec : nom, adresse, latitude, longitude, contact")
+    return acteurs
+
+# ─────────────────────────────────────────────
+# 6ter. ENRICHISSEMENT CONTACT — OpenStreetMap (Overpass API)
+# Gratuit, sans clé API. Récupère téléphone/site web/email quand un
+# contributeur OSM les a renseignés sur l'établissement le plus proche.
+# Couverture partielle par nature (dépend des contributions communautaires) :
+# à ne pas comparer avec Google Places en taux de succès.
+#
+# Le serveur principal (overpass-api.de) rejette depuis 2026 les requêtes
+# "sans visage" (User-Agent générique, pas d'en-tête Accept) avec un
+# HTTP 406, pour filtrer le trafic de bots/scrapers IA. On envoie donc des
+# en-têtes explicites, et on bascule sur un miroir après plusieurs 406
+# consécutifs sur le serveur principal.
+# ─────────────────────────────────────────────
+OSM_SERVEURS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+OSM_HEADERS = {
+    "User-Agent": "PharmadelivMapping/1.0 (usage interne pharmacie ; contact via l'app Streamlit)",
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.5",
+}
+
+def enrichir_contacts_openstreetmap(acteurs, max_acteurs=None, rayon_m=None):
+    max_acteurs = OSM_MAX_ACTEURS if max_acteurs is None else max_acteurs
+    rayon_m     = OSM_RAYON_RECHERCHE_M if rayon_m is None else rayon_m
+
+    a_enrichir = sorted(acteurs, key=lambda a: -a.get("score", 0))[:max_acteurs]
+    cibles     = {id(a) for a in a_enrichir}
+    trouves, echecs = 0, 0
+    serveur_idx = 0
+    echecs_406_consecutifs = 0
+
+    for a in acteurs:
+        if id(a) not in cibles:
+            continue
+        lat, lon = a["latitude"], a["longitude"]
+        query = f"""
+        [out:json][timeout:15];
+        (
+          node(around:{rayon_m},{lat},{lon})["phone"];
+          node(around:{rayon_m},{lat},{lon})["contact:phone"];
+          way(around:{rayon_m},{lat},{lon})["phone"];
+          way(around:{rayon_m},{lat},{lon})["contact:phone"];
+        );
+        out center tags;
+        """
+        url = OSM_SERVEURS[serveur_idx]
+        try:
+            resp = requests.post(url, data={"data": query}, headers=OSM_HEADERS, timeout=20)
+
+            if resp.status_code == 406 and serveur_idx < len(OSM_SERVEURS) - 1:
+                echecs_406_consecutifs += 1
+                if echecs_406_consecutifs >= 2:
+                    serveur_idx += 1
+                    echecs_406_consecutifs = 0
+                    _log(f"OpenStreetMap : bascule sur le miroir {OSM_SERVEURS[serveur_idx]} (HTTP 406 répétés).")
+                    url = OSM_SERVEURS[serveur_idx]
+                    resp = requests.post(url, data={"data": query}, headers=OSM_HEADERS, timeout=20)
+            else:
+                echecs_406_consecutifs = 0
+
+            if resp.status_code != 200:
+                _log(f"OpenStreetMap : HTTP {resp.status_code} pour « {a['nom']} » — {resp.text[:150]}")
+                echecs += 1
+                time.sleep(1.0)
+                continue
+
+            elements = resp.json().get("elements", [])
+            best, best_dist = None, None
+            for el in elements:
+                elat = el.get("lat") or el.get("center", {}).get("lat")
+                elon = el.get("lon") or el.get("center", {}).get("lon")
+                if elat is None or elon is None:
+                    continue
+                d = haversine(lat, lon, elat, elon)
+                if best_dist is None or d < best_dist:
+                    best_dist, best = d, el
+
+            if best:
+                tags = best.get("tags", {})
+                tel   = tags.get("phone") or tags.get("contact:phone") or ""
+                site  = tags.get("website") or tags.get("contact:website") or ""
+                email = tags.get("email") or tags.get("contact:email") or ""
+                if tel and not a.get("telephone"):
+                    a["telephone"] = tel
+                if site and not a.get("site_web"):
+                    a["site_web"] = site
+                if email and not a.get("email"):
+                    a["email"] = email
+                if tel or site or email:
+                    trouves += 1
+
+            time.sleep(1.0)  # politique d'usage Overpass : rester sous ~1 req/s
+
+        except Exception as e:
+            _log(f"Erreur OpenStreetMap pour « {a['nom']} » : {e}")
+            echecs += 1
+
+    _log(f"OpenStreetMap : {trouves}/{len(a_enrichir)} acteur(s) enrichi(s) (gratuit), {echecs} échec(s).")
+    return acteurs
+
+# ─────────────────────────────────────────────
+# 6quater. ENRICHISSEMENT CONTACT — Google Places (optionnel, payant)
+# Ne traite que les acteurs encore sans téléphone après OSM, pour éviter
+# de payer des appels en double. No-op silencieux sans clé API.
+# ─────────────────────────────────────────────
+def enrichir_contacts_google_places(acteurs, api_key=None, max_acteurs=None):
+    api_key     = api_key or os.getenv("GOOGLE_PLACES_API_KEY", "") or GOOGLE_PLACES_API_KEY
+    max_acteurs = GOOGLE_PLACES_MAX_ACTEURS if max_acteurs is None else max_acteurs
+
+    if not api_key:
+        _log("Enrichissement Google Places ignoré : aucune clé API fournie.")
+        return acteurs
+
+    restants = [a for a in acteurs if not a.get("telephone")]
+    a_enrichir = sorted(restants, key=lambda a: -a.get("score", 0))[:max_acteurs]
+    cibles     = {id(a) for a in a_enrichir}
+
+    if not a_enrichir:
+        _log("Enrichissement Google Places : tous les acteurs prioritaires ont déjà un téléphone (via OSM).")
+        return acteurs
+
+    search_url  = "https://places.googleapis.com/v1/places:searchText"
+    trouves, echecs = 0, 0
+
+    for a in acteurs:
+        if id(a) not in cibles:
+            continue
+        requete = f"{a['nom']} {a.get('adresse','')}".strip()
+        if not requete:
+            continue
+        try:
+            resp = requests.post(
+                search_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Goog-Api-Key": api_key,
+                    "X-Goog-FieldMask": (
+                        "places.nationalPhoneNumber,"
+                        "places.internationalPhoneNumber,"
+                        "places.websiteUri"
+                    ),
+                },
+                json={
+                    "textQuery": requete,
+                    "locationBias": {
+                        "circle": {
+                            "center": {"latitude": a["latitude"], "longitude": a["longitude"]},
+                            "radius": 500.0,
+                        }
+                    },
+                    "maxResultCount": 1,
+                },
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                _log(f"Google Places : HTTP {resp.status_code} pour « {a['nom']} » — {resp.text[:150]}")
+                echecs += 1
+                continue
+
+            places = resp.json().get("places", [])
+            if not places:
+                continue
+            place = places[0]
+            tel  = place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber") or ""
+            site = place.get("websiteUri", "")
+            if tel:
+                a["telephone"] = tel
+            if site and not a.get("site_web"):
+                a["site_web"] = site
+            if tel or site:
+                trouves += 1
+
+            time.sleep(0.1)
+
+        except Exception as e:
+            _log(f"Erreur Google Places pour « {a['nom']} » : {e}")
+            echecs += 1
+
+    _log(f"Google Places : {trouves}/{len(a_enrichir)} acteur(s) enrichi(s) en complément d'OSM, {echecs} échec(s).")
     return acteurs
 
 # ─────────────────────────────────────────────
@@ -416,6 +675,14 @@ def scanner_ecosysteme(pharmacie):
 
     # Tri par score décroissant
     uniques.sort(key=lambda x: -x["score"])
+
+    # Enrichissement contact sur les acteurs prioritaires :
+    # 1. OpenStreetMap (gratuit, toujours actif)
+    # 2. Google Places (optionnel, complète seulement ce qu'OSM n'a pas trouvé)
+    print("  Enrichissement contact (OpenStreetMap)...")
+    enrichir_contacts_openstreetmap(uniques)
+    enrichir_contacts_google_places(uniques)
+
     print(f"\n{len(uniques)} acteurs uniques identifiés.")
     return uniques, list(_SCAN_LOGS)
 
@@ -524,13 +791,23 @@ def generer_carte(pharmacie, acteurs, kpi):
             if a["categorie"] != cat:
                 continue
             color = COULEURS[cat]
+            contact_lines = []
+            if a.get('telephone'):
+                contact_lines.append(f"Tel : {a['telephone']}")
+            if a.get('email'):
+                contact_lines.append(f"Email : {a['email']}")
+            if a.get('siren'):
+                contact_lines.append(f"SIREN : {a['siren']}")
+            contact_html = "<br>".join(contact_lines)
+            if contact_html:
+                contact_html = f"{contact_html}<br>"
             popup_html = f"""
                 <b>{a['nom']}</b><br>
                 {a.get('adresse','')}<br>
                 <span style="color:{color}">■ {LABELS[cat]}</span><br>
                 Distance : <b>{a['distance_km']} km</b><br>
                 Source : {a.get('source','')}<br>
-                {"Contact : " + a['contact'] if a.get('contact') else ""}
+                {contact_html}
             """
             folium.CircleMarker(
                 location=[a["latitude"], a["longitude"]],
@@ -579,17 +856,12 @@ def exporter_csv(acteurs, pharmacie, kpi):
             "acteur_nom":            a["nom"],
             "acteur_categorie":      LABELS[a["categorie"]],
             "acteur_adresse":        a.get("adresse", ""),
-            "acteur_contact":        a.get("contact", ""),
+            "acteur_siret":          a.get("siret", ""),
+            "acteur_siren":          a.get("siren", ""),
+            "acteur_telephone":      a.get("telephone", ""),
+            "acteur_email":          a.get("email", ""),
             "distance_km":           a["distance_km"],
             "source":                a.get("source", ""),
-            "siret":                 a.get("siret", ""),
-            "date_scan":             kpi["date_scan"],
-            # Colonnes activation à remplir manuellement
-            "contacte":              "",
-            "date_contact":          "",
-            "reponse":               "",
-            "mise_en_relation":      "",
-            "patientele_generee":    "",
         })
     df = pd.DataFrame(rows)
     df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")

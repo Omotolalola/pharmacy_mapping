@@ -6,8 +6,10 @@ Cette application Streamlit permet de rechercher une pharmacie, d’analyser son
 
 Elle peut identifier des acteurs locaux tels que les CPTS, cabinets médicaux, IDEL, EHPAD, SSIAD, associations et CCAS, puis produire :
 - une carte interactive HTML,
-- un export CSV des acteurs identifiés,
+- un export CSV des acteurs identifiés (fiche de contact pour le démarchage),
 - un export JSON des KPI.
+
+Pour chaque acteur identifié, l'application tente de récupérer automatiquement ses informations légales (SIRET/SIREN) et ses coordonnées de contact (téléphone, site web) — voir la section [Obtention des informations de contact](#obtention-des-informations-de-contact) ci-dessous pour le détail des sources utilisées.
 
 ## Fichiers principaux
 
@@ -48,10 +50,78 @@ $env:PHARMADELIV_CPTS_CSV = "C:\chemin\vers\cpts_hubspot.csv"
 
 Pour un déploiement public, le code peut rester sur GitHub, mais les fichiers sensibles doivent être fournis via des variables d’environnement ou secrets de l’environnement de déploiement.
 
+## Obtention des informations de contact
+
+Chaque acteur passe par un pipeline en plusieurs étapes, résumé ci-dessous, puis détaillé plus bas.
+
+| Donnée | Source | Fiabilité | Coût |
+|---|---|---|---|
+| Nom, adresse, SIRET, SIREN | API SIRENE / RNA (recherche-entreprises.api.gouv.fr) | Officielle, quasi-exhaustive | Gratuit |
+| Téléphone, site web, email | OpenStreetMap (Overpass API) | Communautaire, couverture partielle | Gratuit |
+| Téléphone, site web (complément) | Google Places | Élevée | Payant à l'usage |
+| Email | — | Non automatisable de façon fiable | — |
+
+### 1. Identité légale (SIRET / SIREN) — toujours actif
+
+Pour chaque catégorie d'acteur (cabinet médical, IDEL, EHPAD, SSIAD, CCAS, associations), l'application interroge l'**API Recherche d'Entreprises** (`recherche-entreprises.api.gouv.fr`), qui agrège les données officielles Insee (SIRENE) et le Répertoire National des Associations (RNA). Cette API est publique, gratuite et ne nécessite aucune clé.
+
+Elle fournit : nom, adresse, coordonnées GPS, code NAF, SIRET et SIREN. Elle **ne fournit jamais** de téléphone ni d'email : il s'agit d'un registre légal, pas d'un annuaire de contact.
+
+⚠️ Certains établissements (professions libérales notamment) exercent leur droit d'opposition à la diffusion de leurs données et remontent en `[NON-DIFFUSIBLE]` — ils sont automatiquement ignorés lors du scan (comptabilisés dans les logs, mais absents des résultats).
+
+### 2. Téléphone / site web / email — OpenStreetMap (gratuit, actif par défaut)
+
+Une fois les acteurs identifiés et triés par score de priorité, l'application interroge l'**Overpass API** (`overpass-api.de`, avec bascule automatique sur un miroir en cas d'indisponibilité) pour chercher, dans un rayon de 120 m autour de chaque acteur prioritaire, un point OpenStreetMap portant un tag `phone`, `website` ou `email` (ou leurs variantes `contact:*`).
+
+- **Gratuit, sans clé API, actif automatiquement**, aucune configuration requise.
+- **Couverture partielle** : dépend uniquement des contributions de la communauté OSM. Attends-toi à des résultats pour une minorité des acteurs, surtout pour les petites structures (cabinets individuels, associations).
+- Limité aux **30 acteurs les plus prioritaires** par scan (variable `OSM_MAX_ACTEURS`), pour rester raisonnable en nombre de requêtes.
+- Politique de débit respectée (~1 requête/seconde) : un scan complet peut prendre 20 à 30 secondes rien que pour cette étape.
+
+### 3. Téléphone / site web — Google Places (optionnel, payant à l'usage)
+
+Si une clé API Google Places est configurée, l'application complète automatiquement **uniquement les acteurs qu'OpenStreetMap n'a pas réussi à enrichir** (pour éviter de payer des appels redondants).
+
+**Activation :**
+
+1. Créer un projet sur la [Google Cloud Console](https://console.cloud.google.com/), activer l'API **"Places API (New)"**, générer une clé API, et activer la facturation du projet (un crédit gratuit mensuel est généralement offert — vérifier le montant actuel sur la [page tarifaire officielle](https://mapsplatform.google.com/pricing/)).
+2. Restreindre la clé à l'API Places uniquement (recommandé).
+3. Configurer la clé **sans jamais la saisir dans l'interface** :
+   - **Streamlit Cloud** : *Manage app* → *Settings* → *Secrets* :
+     ```toml
+     GOOGLE_PLACES_API_KEY = "AIzaSy...ta_clé"
+     ```
+   - **En local** : créer `.streamlit/secrets.toml` (déjà exclu du dépôt via `.gitignore`) avec le même contenu, ou définir la variable d'environnement `GOOGLE_PLACES_API_KEY`.
+4. Aucun engagement : la facturation est à l'usage, désactivable à tout moment (Console → Billing → *Disable billing*), et des alertes de budget peuvent être configurées (Console → Billing → *Budgets & alerts*).
+
+Sans clé configurée, cette étape est silencieusement ignorée (aucune erreur, juste une ligne de log informative).
+
+### 4. Email — non automatisé
+
+Aucune source publique fiable et gratuite ne fournit d'email d'entreprise à grande échelle. Le champ `email` peut être renseigné ponctuellement par OpenStreetMap (rare), mais reste globalement à compléter manuellement pendant le démarchage — le champ `site_web` récupéré via OSM/Google Places sert justement de point de départ pour le trouver (page "Contact" du site).
+
+### Diagnostiquer les résultats d'un scan
+
+Après chaque scan, un panneau **"⚠ avertissements pendant le scan"** liste, étape par étape, les erreurs API rencontrées (codes HTTP, messages exacts). En cas de résultat vide ou surprenant, c'est le premier endroit à consulter.
+
+Un **mode debug** plus poussé est disponible en définissant `PHARMADELIV_DEBUG=1` (variable d'environnement ou `st.secrets`) : il journalise la structure JSON brute renvoyée par l'API SIRENE/RNA pour le premier résultat de chaque catégorie, utile si l'API change de schéma.
+
+### Variables de configuration disponibles
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `GOOGLE_PLACES_API_KEY` | Active l'enrichissement Google Places | (vide = désactivé) |
+| `GOOGLE_PLACES_MAX_ACTEURS` | Nb d'acteurs enrichis via Google Places par scan | `30` |
+| `OSM_MAX_ACTEURS` | Nb d'acteurs enrichis via OpenStreetMap par scan | `30` |
+| `OSM_RAYON_RECHERCHE_M` | Rayon de recherche OSM autour de chaque acteur (mètres) | `120` |
+| `PHARMADELIV_DEBUG` | Active le mode debug (dump JSON brut) | (vide = désactivé) |
+
 ## Fonctionnalités actuelles
 
 - recherche et filtrage des pharmacies,
 - filtre pour n’afficher que les pharmacies déjà associées à Pharmadeliv,
+- identification des acteurs de l'écosystème (SIRET/SIREN via SIRENE/RNA),
+- enrichissement automatique téléphone/site web (OpenStreetMap, + Google Places en option),
 - génération d’une carte interactive avec légende,
-- export des résultats en CSV/JSON,
-- affichage des résultats sans score visible dans l’interface.
+- export des résultats en CSV/JSON (fiche de contact pour le démarchage),
+- affichage des résultats avec score de priorité visible dans l’interface.

@@ -1,4 +1,5 @@
 import json
+import os
 
 import pandas as pd
 import streamlit as st
@@ -14,6 +15,21 @@ from pharmadeliv_mapping_v2 import (
     OUTPUT_KPI,
     OUTPUT_MAP,
 )
+
+# Clé Google Places : à définir dans .streamlit/secrets.toml (local) ou dans
+# "Secrets" sur Streamlit Cloud, jamais saisie dans l'interface (confidentialité).
+#   [general]
+#   GOOGLE_PLACES_API_KEY = "AIza..."
+# En local, si aucun fichier secrets.toml n'existe, st.secrets lève une
+# exception au lieu de se comporter comme un dict vide : on l'attrape ici
+# pour que l'app démarre normalement même sans clé configurée.
+try:
+    if "GOOGLE_PLACES_API_KEY" in st.secrets:
+        os.environ["GOOGLE_PLACES_API_KEY"] = st.secrets["GOOGLE_PLACES_API_KEY"]
+    if "PHARMADELIV_DEBUG" in st.secrets:
+        os.environ["PHARMADELIV_DEBUG"] = str(st.secrets["PHARMADELIV_DEBUG"])
+except Exception:
+    pass
 
 st.set_page_config(page_title="Pharmadeliv Mapping interactif", layout="wide")
 
@@ -95,6 +111,15 @@ with st.sidebar:
     st.write("**Résultats export**")
     st.write("La carte HTML et les fichiers CSV/JSON sont générés automatiquement après le scan.")
 
+    st.caption("🌍 Enrichissement téléphone/site web (OpenStreetMap, gratuit) : toujours actif")
+    if os.getenv("GOOGLE_PLACES_API_KEY"):
+        st.caption("🔑 Enrichissement complémentaire (Google Places) : activé")
+    else:
+        st.caption(
+            "🔒 Enrichissement complémentaire Google Places désactivé — ajoute "
+            "`GOOGLE_PLACES_API_KEY` dans les Secrets de l'app pour l'activer."
+        )
+
 if selected_pharmacie is not None:
     st.sidebar.success(f"Pharmacie sélectionnée : {selected_pharmacie['nom']}")
 
@@ -131,8 +156,25 @@ if selected_pharmacie is not None:
 
         st.markdown("### Tableau complet des acteurs")
         df_acteurs = pd.DataFrame(acteurs)
-        if "score" in df_acteurs.columns:
-            df_acteurs = df_acteurs.drop(columns=["score"])
+        preferred_cols = [
+            "nom",
+            "categorie",
+            "label",
+            "distance_km",
+            "telephone",
+            "email",
+            "site_web",
+            "siret",
+            "siren",
+            "source",
+            "adresse",
+            "latitude",
+            "longitude",
+        ]
+        display_cols = [c for c in preferred_cols if c in df_acteurs.columns]
+        display_cols += [c for c in df_acteurs.columns if c not in display_cols]
+        display_cols = [c for c in display_cols if c not in ("contact", "score")]
+        df_acteurs = df_acteurs[display_cols]
         st.dataframe(df_acteurs, use_container_width=True)
 
         st.markdown("### Carte interactive")
@@ -149,11 +191,9 @@ if selected_pharmacie is not None:
                 csv_bytes = f_csv.read()
             with open(OUTPUT_MAP, "r", encoding="utf-8") as f_map:
                 html_bytes = f_map.read().encode("utf-8")
-            json_bytes = json.dumps(kpi, ensure_ascii=False, indent=2).encode("utf-8")
 
             st.download_button("Télécharger la carte HTML", data=html_bytes, file_name=OUTPUT_MAP, mime="text/html")
             st.download_button("Télécharger le CSV des acteurs", data=csv_bytes, file_name=OUTPUT_CSV, mime="text/csv")
-            st.download_button("Télécharger les KPI JSON", data=json_bytes, file_name=OUTPUT_KPI, mime="application/json")
         except FileNotFoundError as e:
             st.warning(f"Fichier non trouvé : {e}")
 else:
