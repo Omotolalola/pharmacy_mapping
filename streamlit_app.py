@@ -168,12 +168,10 @@ if selected_pharmacie is not None:
             "siren",
             "source",
             "adresse",
-            "latitude",
-            "longitude",
         ]
         display_cols = [c for c in preferred_cols if c in df_acteurs.columns]
         display_cols += [c for c in df_acteurs.columns if c not in display_cols]
-        display_cols = [c for c in display_cols if c not in ("contact", "score")]
+        display_cols = [c for c in display_cols if c not in ("contact", "score", "latitude", "longitude")]
         df_acteurs = df_acteurs[display_cols]
         st.dataframe(df_acteurs, use_container_width=True)
 
