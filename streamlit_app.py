@@ -111,7 +111,8 @@ with st.sidebar:
     st.write("**Résultats export**")
     st.write("La carte HTML et les fichiers CSV/JSON sont générés automatiquement après le scan.")
 
-    st.caption("🌍 Enrichissement téléphone/site web (OpenStreetMap, gratuit) : toujours actif")
+    st.caption("🔑 Enrichissement complémentaire (Google Places) : activé" if os.getenv("GOOGLE_PLACES_API_KEY") else "🔒 Enrichissement complémentaire Google Places désactivé — ajoute `GOOGLE_PLACES_API_KEY` dans les Secrets de l'app pour l'activer.")
+
     if os.getenv("GOOGLE_PLACES_API_KEY"):
         st.caption("🔑 Enrichissement complémentaire (Google Places) : activé")
     else:
@@ -171,7 +172,7 @@ if selected_pharmacie is not None:
         ]
         display_cols = [c for c in preferred_cols if c in df_acteurs.columns]
         display_cols += [c for c in df_acteurs.columns if c not in display_cols]
-        display_cols = [c for c in display_cols if c not in ("contact", "score", "latitude", "longitude")]
+        display_cols = [c for c in display_cols if c not in ("contact", "score", "latitude", "longitude", "telephone_source", "email_source")]
         df_acteurs = df_acteurs[display_cols]
         st.dataframe(df_acteurs, use_container_width=True)
 

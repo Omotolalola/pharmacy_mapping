@@ -57,8 +57,7 @@ Chaque acteur passe par un pipeline en plusieurs étapes, résumé ci-dessous, p
 | Donnée | Source | Fiabilité | Coût |
 |---|---|---|---|
 | Nom, adresse, SIRET, SIREN | API SIRENE / RNA (recherche-entreprises.api.gouv.fr) | Officielle, quasi-exhaustive | Gratuit |
-| Téléphone, site web, email | OpenStreetMap (Overpass API) | Communautaire, couverture partielle | Gratuit |
-| Téléphone, site web (complément) | Google Places | Élevée | Payant à l'usage |
+| Téléphone, site web | Google Places | Élevée | Payant à l'usage |
 | Email | — | Non automatisable de façon fiable | — |
 
 ### 1. Identité légale (SIRET / SIREN) — toujours actif
@@ -69,18 +68,17 @@ Elle fournit : nom, adresse, coordonnées GPS, code NAF, SIRET et SIREN. Elle **
 
 ⚠️ Certains établissements (professions libérales notamment) exercent leur droit d'opposition à la diffusion de leurs données et remontent en `[NON-DIFFUSIBLE]` — ils sont automatiquement ignorés lors du scan (comptabilisés dans les logs, mais absents des résultats).
 
-### 2. Téléphone / site web / email — OpenStreetMap (gratuit, actif par défaut)
+### 2. Téléphone / site web — Google Places (payant à l'usage)
 
-Une fois les acteurs identifiés et triés par score de priorité, l'application interroge l'**Overpass API** (`overpass-api.de`, avec bascule automatique sur un miroir en cas d'indisponibilité) pour chercher, dans un rayon de 120 m autour de chaque acteur prioritaire, un point OpenStreetMap portant un tag `phone`, `website` ou `email` (ou leurs variantes `contact:*`).
+Une fois les acteurs identifiés et triés par score de priorité, l'application interroge la Google Places API pour rechercher les numéros de téléphone et les sites web des établissements.
 
-- **Gratuit, sans clé API, actif automatiquement**, aucune configuration requise.
-- **Couverture partielle** : dépend uniquement des contributions de la communauté OSM. Attends-toi à des résultats pour une minorité des acteurs, surtout pour les petites structures (cabinets individuels, associations).
-- Limité aux **30 acteurs les plus prioritaires** par scan (variable `OSM_MAX_ACTEURS`), pour rester raisonnable en nombre de requêtes.
-- Politique de débit respectée (~1 requête/seconde) : un scan complet peut prendre 20 à 30 secondes rien que pour cette étape.
+- **Nécessite une clé API Google Places**, configurée via les secrets ou variables d'environnement.
+- **Meilleure couverture** qu'une source communautaire, mais reste dépendante des données Google.
+- Cette étape est la seule source d'enrichissement contact dans le projet.
 
-### 3. Téléphone / site web — Google Places (optionnel, payant à l'usage)
+### 3. Email — non automatisé
 
-Si une clé API Google Places est configurée, l'application complète automatiquement **uniquement les acteurs qu'OpenStreetMap n'a pas réussi à enrichir** (pour éviter de payer des appels redondants).
+Aucune source publique fiable et gratuite ne fournit d'email d'entreprise à grande échelle. Le champ `email` peut être trouvé ponctuellement via certains résultats Google Places, mais il reste globalement à compléter manuellement pendant le démarchage — le champ `site_web` sert de point de départ pour trouver la page "Contact" du site.
 
 **Activation :**
 
@@ -98,7 +96,7 @@ Sans clé configurée, cette étape est silencieusement ignorée (aucune erreur,
 
 ### 4. Email — non automatisé
 
-Aucune source publique fiable et gratuite ne fournit d'email d'entreprise à grande échelle. Le champ `email` peut être renseigné ponctuellement par OpenStreetMap (rare), mais reste globalement à compléter manuellement pendant le démarchage — le champ `site_web` récupéré via OSM/Google Places sert justement de point de départ pour le trouver (page "Contact" du site).
+Aucune source publique fiable et gratuite ne fournit d'email d'entreprise à grande échelle. Le champ `email` peut être trouvé ponctuellement via certains résultats Google Places, mais il reste globalement à compléter manuellement pendant le démarchage — le champ `site_web` récupéré via Google Places sert de point de départ pour trouver la page "Contact" du site.
 
 ### Diagnostiquer les résultats d'un scan
 
@@ -111,17 +109,13 @@ Un **mode debug** plus poussé est disponible en définissant `PHARMADELIV_DEBUG
 | Variable | Rôle | Défaut |
 |---|---|---|
 | `GOOGLE_PLACES_API_KEY` | Active l'enrichissement Google Places | (vide = désactivé) |
-| `GOOGLE_PLACES_MAX_ACTEURS` | Nb d'acteurs enrichis via Google Places par scan | `30` |
-| `OSM_MAX_ACTEURS` | Nb d'acteurs enrichis via OpenStreetMap par scan | `30` |
-| `OSM_RAYON_RECHERCHE_M` | Rayon de recherche OSM autour de chaque acteur (mètres) | `120` |
-| `PHARMADELIV_DEBUG` | Active le mode debug (dump JSON brut) | (vide = désactivé) |
 
 ## Fonctionnalités actuelles
 
 - recherche et filtrage des pharmacies,
 - filtre pour n’afficher que les pharmacies déjà associées à Pharmadeliv,
 - identification des acteurs de l'écosystème (SIRET/SIREN via SIRENE/RNA),
-- enrichissement automatique téléphone/site web (OpenStreetMap, + Google Places en option),
+- enrichissement automatique téléphone/site web via Google Places,
 - génération d’une carte interactive avec légende,
 - export des résultats en CSV/JSON (fiche de contact pour le démarchage),
 - affichage des résultats avec score de priorité visible dans l’interface.

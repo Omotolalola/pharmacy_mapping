@@ -8,7 +8,8 @@ Conforme au document de cadrage v1 :
 - Indicateurs de succès (densité, couverture, activation, impact)
 
 Usage :
-    pip install pandas requests folium openpyxl
+    pip install pandas requests folium openpyxl python-dotenv
+    (clé API à définir dans un fichier .env : GOOGLE_PLACES_API_KEY=...)
     python pharmadeliv_mapping_v2.py
 """
 
@@ -21,6 +22,11 @@ import requests
 import folium
 from folium.plugins import MarkerCluster
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Charge les variables définies dans le fichier .env (à faire AVANT
+# tout appel à os.getenv() qui en dépend, ex: GOOGLE_PLACES_API_KEY)
+load_dotenv()
 
 # ─────────────────────────────────────────────
 # CONFIG GÉNÉRALE
@@ -33,17 +39,13 @@ OUTPUT_KPI     = os.getenv("PHARMADELIV_OUTPUT_KPI", "kpi_ecosysteme.json")
 
 # ── Enrichissement contact (téléphone / site web / email)
 # SIRENE/RNA ne fournissent JAMAIS ces informations (registres légaux Insee,
-# pas des annuaires). Deux sources complémentaires, appliquées uniquement
-# aux acteurs les plus prioritaires (score le plus élevé) :
-#   1. OpenStreetMap (Overpass API) — gratuit, sans clé, actif par défaut,
-#      mais couverture partielle (dépend des contributions communautaires).
-#   2. Google Places — payant à l'usage, meilleure couverture, complète
-#      uniquement les acteurs encore sans téléphone après OSM. Inactif tant
-#      que GOOGLE_PLACES_API_KEY n'est pas configurée.
-OSM_MAX_ACTEURS          = int(os.getenv("OSM_MAX_ACTEURS", "30"))
-OSM_RAYON_RECHERCHE_M    = int(os.getenv("OSM_RAYON_RECHERCHE_M", "120"))
-GOOGLE_PLACES_API_KEY    = os.getenv("GOOGLE_PLACES_API_KEY", "")
-GOOGLE_PLACES_MAX_ACTEURS = int(os.getenv("GOOGLE_PLACES_MAX_ACTEURS", "30"))
+# pas des annuaires). La source complémentaire utilisée est Google Places.
+GOOGLE_PLACES_API_KEY    = os.getenv("GOOGLE_PLACES_API_KEY")
+if not GOOGLE_PLACES_API_KEY:
+    raise RuntimeError(
+        "Variable d'environnement GOOGLE_PLACES_API_KEY manquante. "
+        "Définis-la avant de lancer le script (ex: export GOOGLE_PLACES_API_KEY=... ou fichier .env)."
+    )
 
 # ── Rayons par catégorie (conforme cadrage §4)
 RAYONS_KM = {
@@ -57,12 +59,40 @@ RAYONS_KM = {
 }
 
 # ── Codes NAF par catégorie SIRENE
+# NB : "ccas" n'est PAS filtré ici. Le NAF 84.11Z correspond à
+# "Administration publique générale" — bien trop large : il remonte aussi
+# les ministères, préfectures, DGFIP, douanes, régions, autorités
+# indépendantes... qui partagent ce même code NAF que les CCAS.
+# Les CCAS sont identifiés séparément via leur code de nature juridique
+# INSEE, spécifique et sans ambiguïté (cf. NATURE_JURIDIQUE_CODES ci-dessous).
 NAF_CODES = {
     "cabinet": ["86.21Z", "86.22A", "86.22B"],
     "idel":    ["86.90A"],
     "ehpad":   ["87.10A", "87.10B", "87.10C"],
     "ssiad":   ["88.10A", "88.10B"],
-    "ccas":    ["84.11Z"],
+}
+
+# ── Codes de nature juridique INSEE par catégorie
+# 7361 = "Centre communal d'action sociale" (nomenclature des Catégories
+# Juridiques INSEE, niveau III). Contrairement au NAF 84.11Z, ce code
+# identifie spécifiquement les CCAS et exclut par construction tout le
+# reste de l'administration publique.
+# Réf : https://xml.insee.fr/schema/cj-enum.html
+NATURE_JURIDIQUE_CODES = {
+    "ccas": ["7361"],
+}
+
+# ── Mots-clés d'exclusion par catégorie (filtre de sécurité post-scan)
+# Le NAF 88.10A ("Aide à domicile") est auto-déclaré à la création de
+# l'entreprise et regroupe aussi bien des SSIAD/SAAD (aide à la personne)
+# que des sociétés de nettoyage/ménage pur, qui choisissent parfois ce code
+# faute de mieux. On les retire par mot-clé sur le nom, à défaut d'un NAF
+# plus précis pour distinguer les deux.
+EXCLUSION_MOTS_CLES = {
+    "ssiad": [
+        "nettoyage", "clean", "menage", "ménage", "pressing",
+        "jardinage", "jardin services", "espaces verts",
+    ],
 }
 
 # ── Score de priorité de base par catégorie (cadrage §3 — levier de croissance)
@@ -166,6 +196,7 @@ def haversine(lat1, lon1, lat2, lon2):
          * math.sin(dlon / 2) ** 2)
     return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 3)
 
+
 # ─────────────────────────────────────────────
 # 3. SCORE DE PRIORITÉ
 # Combine type d'acteur + distance (cadrage §4 — étape 5)
@@ -236,7 +267,12 @@ def dernier_scan_logs():
 # ─────────────────────────────────────────────
 # 4. SCAN SIRENE
 # ─────────────────────────────────────────────
-def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
+def _scanner_sirene_generique(lat, lon, params_filtre, departement, rayon_km, tag, naf_valeur):
+    """Coeur commun des scans SIRENE. `params_filtre` porte le(s) paramètre(s)
+    de filtrage envoyés tels quels à l'API (ex: {"activite_principale": "84.11Z"}
+    ou {"nature_juridique": "7361"}). `tag` sert uniquement aux logs/debug.
+    `naf_valeur` est la valeur stockée dans le champ "naf" de l'acteur (utile
+    pour les filtres qui ne portent pas sur activite_principale)."""
     url         = "https://recherche-entreprises.api.gouv.fr/search"
     acteurs     = []
     page        = 1
@@ -244,7 +280,7 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
 
     while True:
         params = {
-            "activite_principale": naf_code,
+            **params_filtre,
             "departement": str(departement).zfill(2),
             "per_page": 25,
             "page": page,
@@ -258,13 +294,13 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
             retries = 0
             while resp.status_code == 429 and retries < 3:
                 wait = 2 * (retries + 1)
-                _log(f"HTTP 429 (rate-limit) sur {naf_code}, nouvelle tentative dans {wait}s...")
+                _log(f"HTTP 429 (rate-limit) sur {tag}, nouvelle tentative dans {wait}s...")
                 time.sleep(wait)
                 resp = requests.get(url, params=params, timeout=10)
                 retries += 1
 
             if resp.status_code != 200:
-                _log(f"Erreur SIRENE ({naf_code}) : HTTP {resp.status_code} — {resp.text[:150]}")
+                _log(f"Erreur SIRENE ({tag}) : HTTP {resp.status_code} — {resp.text[:150]}")
                 break
             data    = resp.json()
             results = data.get("results", [])
@@ -288,7 +324,7 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
                     continue
                 dist = haversine(lat, lon, lat2, lon2)
                 if dist <= rayon_km:
-                    _debug_dump_resultat(f"SIRENE/{naf_code}", r)
+                    _debug_dump_resultat(f"SIRENE/{tag}", r)
                     siret = extraire_siret(r, siege)
                     telephone = siege.get("telephone", "")
                     email = siege.get("email", "")
@@ -301,10 +337,12 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
                         "distance_km": dist,
                         "siret":       siret,
                         "siren":       siren,
-                        "naf":         naf_code,
+                        "naf":         naf_valeur,
                         "contact":     "",
                         "telephone":   telephone,
+                        "telephone_source": "SIRENE" if telephone else "",
                         "email":       email,
+                        "email_source": "SIRENE" if email else "",
                         "source":      "SIRENE",
                     })
 
@@ -314,13 +352,34 @@ def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
             time.sleep(0.3)
 
         except Exception as e:
-            _log(f"Erreur SIRENE ({naf_code}) : {e}")
+            _log(f"Erreur SIRENE ({tag}) : {e}")
             break
 
     if non_diffusibles:
-        print(f"    {non_diffusibles} etablissement(s) non-diffusible(s) (RGPD) ignores pour {naf_code}")
+        print(f"    {non_diffusibles} etablissement(s) non-diffusible(s) (RGPD) ignores pour {tag}")
 
     return acteurs
+
+
+def scanner_sirene(lat, lon, naf_code, departement, rayon_km):
+    """Scan filtré par code NAF (activite_principale)."""
+    return _scanner_sirene_generique(
+        lat, lon,
+        params_filtre={"activite_principale": naf_code},
+        departement=departement, rayon_km=rayon_km,
+        tag=naf_code, naf_valeur=naf_code,
+    )
+
+
+def scanner_sirene_nature_juridique(lat, lon, nature_juridique_code, departement, rayon_km, naf_valeur):
+    """Scan filtré par code de nature juridique INSEE (ex: 7361 = CCAS),
+    plus précis qu'un NAF pour les catégories d'administration publique."""
+    return _scanner_sirene_generique(
+        lat, lon,
+        params_filtre={"nature_juridique": nature_juridique_code},
+        departement=departement, rayon_km=rayon_km,
+        tag=f"nature_juridique={nature_juridique_code}", naf_valeur=naf_valeur,
+    )
 
 
 
@@ -386,7 +445,9 @@ def scanner_rna(lat, lon, departement, rayon_km):
                         "siren":       siren,
                         "naf":         "asso",
                         "telephone":   telephone,
+                        "telephone_source": "RNA" if telephone else "",
                         "email":       email,
+                        "email_source": "RNA" if email else "",
                         "source":      "RNA (via Recherche d'Entreprises)",
                     })
             time.sleep(0.3)
@@ -422,7 +483,9 @@ def charger_cpts(lat, lon, rayon_km):
                     "naf":         "cpts",
                     "contact":     telephone or email or row.get("contact", ""),
                     "telephone":   telephone,
+                    "telephone_source": "HubSpot CRM" if telephone else "",
                     "email":       email,
+                    "email_source": "HubSpot CRM" if email else "",
                     "source":      "HubSpot CRM",
                 })
         print(f"    {len(acteurs)} CPTS trouvée(s) dans le rayon")
@@ -432,127 +495,22 @@ def charger_cpts(lat, lon, rayon_km):
     return acteurs
 
 # ─────────────────────────────────────────────
-# 6ter. ENRICHISSEMENT CONTACT — OpenStreetMap (Overpass API)
-# Gratuit, sans clé API. Récupère téléphone/site web/email quand un
-# contributeur OSM les a renseignés sur l'établissement le plus proche.
-# Couverture partielle par nature (dépend des contributions communautaires) :
-# à ne pas comparer avec Google Places en taux de succès.
-#
-# Le serveur principal (overpass-api.de) rejette depuis 2026 les requêtes
-# "sans visage" (User-Agent générique, pas d'en-tête Accept) avec un
-# HTTP 406, pour filtrer le trafic de bots/scrapers IA. On envoie donc des
-# en-têtes explicites, et on bascule sur un miroir après plusieurs 406
-# consécutifs sur le serveur principal.
-# ─────────────────────────────────────────────
-OSM_SERVEURS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-]
-OSM_HEADERS = {
-    "User-Agent": "PharmadelivMapping/1.0 (usage interne pharmacie ; contact via l'app Streamlit)",
-    "Accept": "application/json",
-    "Accept-Encoding": "gzip, deflate",
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.5",
-}
-
-def enrichir_contacts_openstreetmap(acteurs, max_acteurs=None, rayon_m=None):
-    max_acteurs = OSM_MAX_ACTEURS if max_acteurs is None else max_acteurs
-    rayon_m     = OSM_RAYON_RECHERCHE_M if rayon_m is None else rayon_m
-
-    a_enrichir = sorted(acteurs, key=lambda a: -a.get("score", 0))[:max_acteurs]
-    cibles     = {id(a) for a in a_enrichir}
-    trouves, echecs = 0, 0
-    serveur_idx = 0
-    echecs_406_consecutifs = 0
-
-    for a in acteurs:
-        if id(a) not in cibles:
-            continue
-        lat, lon = a["latitude"], a["longitude"]
-        query = f"""
-        [out:json][timeout:15];
-        (
-          node(around:{rayon_m},{lat},{lon})["phone"];
-          node(around:{rayon_m},{lat},{lon})["contact:phone"];
-          way(around:{rayon_m},{lat},{lon})["phone"];
-          way(around:{rayon_m},{lat},{lon})["contact:phone"];
-        );
-        out center tags;
-        """
-        url = OSM_SERVEURS[serveur_idx]
-        try:
-            resp = requests.post(url, data={"data": query}, headers=OSM_HEADERS, timeout=20)
-
-            if resp.status_code == 406 and serveur_idx < len(OSM_SERVEURS) - 1:
-                echecs_406_consecutifs += 1
-                if echecs_406_consecutifs >= 2:
-                    serveur_idx += 1
-                    echecs_406_consecutifs = 0
-                    _log(f"OpenStreetMap : bascule sur le miroir {OSM_SERVEURS[serveur_idx]} (HTTP 406 répétés).")
-                    url = OSM_SERVEURS[serveur_idx]
-                    resp = requests.post(url, data={"data": query}, headers=OSM_HEADERS, timeout=20)
-            else:
-                echecs_406_consecutifs = 0
-
-            if resp.status_code != 200:
-                _log(f"OpenStreetMap : HTTP {resp.status_code} pour « {a['nom']} » — {resp.text[:150]}")
-                echecs += 1
-                time.sleep(1.0)
-                continue
-
-            elements = resp.json().get("elements", [])
-            best, best_dist = None, None
-            for el in elements:
-                elat = el.get("lat") or el.get("center", {}).get("lat")
-                elon = el.get("lon") or el.get("center", {}).get("lon")
-                if elat is None or elon is None:
-                    continue
-                d = haversine(lat, lon, elat, elon)
-                if best_dist is None or d < best_dist:
-                    best_dist, best = d, el
-
-            if best:
-                tags = best.get("tags", {})
-                tel   = tags.get("phone") or tags.get("contact:phone") or ""
-                site  = tags.get("website") or tags.get("contact:website") or ""
-                email = tags.get("email") or tags.get("contact:email") or ""
-                if tel and not a.get("telephone"):
-                    a["telephone"] = tel
-                if site and not a.get("site_web"):
-                    a["site_web"] = site
-                if email and not a.get("email"):
-                    a["email"] = email
-                if tel or site or email:
-                    trouves += 1
-
-            time.sleep(1.0)  # politique d'usage Overpass : rester sous ~1 req/s
-
-        except Exception as e:
-            _log(f"Erreur OpenStreetMap pour « {a['nom']} » : {e}")
-            echecs += 1
-
-    _log(f"OpenStreetMap : {trouves}/{len(a_enrichir)} acteur(s) enrichi(s) (gratuit), {echecs} échec(s).")
-    return acteurs
-
-# ─────────────────────────────────────────────
 # 6quater. ENRICHISSEMENT CONTACT — Google Places (optionnel, payant)
-# Ne traite que les acteurs encore sans téléphone après OSM, pour éviter
-# de payer des appels en double. No-op silencieux sans clé API.
+# Traite tous les acteurs sans téléphone connus. No-op silencieux sans clé API.
 # ─────────────────────────────────────────────
-def enrichir_contacts_google_places(acteurs, api_key=None, max_acteurs=None):
-    api_key     = api_key or os.getenv("GOOGLE_PLACES_API_KEY", "") or GOOGLE_PLACES_API_KEY
-    max_acteurs = GOOGLE_PLACES_MAX_ACTEURS if max_acteurs is None else max_acteurs
+def enrichir_contacts_google_places(acteurs, api_key=None):
+    api_key = api_key or os.getenv("GOOGLE_PLACES_API_KEY", "") or GOOGLE_PLACES_API_KEY
 
     if not api_key:
         _log("Enrichissement Google Places ignoré : aucune clé API fournie.")
         return acteurs
 
     restants = [a for a in acteurs if not a.get("telephone")]
-    a_enrichir = sorted(restants, key=lambda a: -a.get("score", 0))[:max_acteurs]
+    a_enrichir = sorted(restants, key=lambda a: -a.get("score", 0))
     cibles     = {id(a) for a in a_enrichir}
 
     if not a_enrichir:
-        _log("Enrichissement Google Places : tous les acteurs prioritaires ont déjà un téléphone (via OSM).")
+        _log("Enrichissement Google Places : tous les acteurs prioritaires ont déjà un téléphone.")
         return acteurs
 
     search_url  = "https://places.googleapis.com/v1/places:searchText"
@@ -612,7 +570,7 @@ def enrichir_contacts_google_places(acteurs, api_key=None, max_acteurs=None):
             _log(f"Erreur Google Places pour « {a['nom']} » : {e}")
             echecs += 1
 
-    _log(f"Google Places : {trouves}/{len(a_enrichir)} acteur(s) enrichi(s) en complément d'OSM, {echecs} échec(s).")
+    _log(f"Google Places : {trouves}/{len(a_enrichir)} acteur(s) enrichi(s), {echecs} échec(s).")
     return acteurs
 
 # ─────────────────────────────────────────────
@@ -633,12 +591,34 @@ def scanner_ecosysteme(pharmacie):
     tous = []
     print("Scan de l'écosystème en cours...\n")
 
-    # SIRENE
+    # SIRENE — filtre par NAF (cabinet, idel, ehpad, ssiad)
     for cat, codes in NAF_CODES.items():
         rayon = RAYONS_KM[cat]
         print(f"  {LABELS[cat]} (rayon {rayon} km)...")
+        mots_exclus = [m.lower() for m in EXCLUSION_MOTS_CLES.get(cat, [])]
         for naf in codes:
             acteurs = scanner_sirene(lat, lon, naf, dept, rayon)
+            if mots_exclus:
+                avant = len(acteurs)
+                acteurs = [
+                    a for a in acteurs
+                    if not any(m in a["nom"].lower() for m in mots_exclus)
+                ]
+                exclus = avant - len(acteurs)
+                if exclus:
+                    _log(f"{exclus} acteur(s) exclu(s) de {LABELS[cat]} ({naf}) par mot-clé (nettoyage/ménage/...).")
+            for a in acteurs:
+                a["categorie"] = cat
+                a["label"]     = LABELS[cat]
+                a["score"]     = calculer_score(cat, a["distance_km"], rayon)
+            tous.extend(acteurs)
+
+    # SIRENE — filtre par nature juridique INSEE (ccas)
+    for cat, codes in NATURE_JURIDIQUE_CODES.items():
+        rayon = RAYONS_KM[cat]
+        print(f"  {LABELS[cat]} (rayon {rayon} km)...")
+        for code_nj in codes:
+            acteurs = scanner_sirene_nature_juridique(lat, lon, code_nj, dept, rayon, naf_valeur=cat)
             for a in acteurs:
                 a["categorie"] = cat
                 a["label"]     = LABELS[cat]
@@ -677,10 +657,8 @@ def scanner_ecosysteme(pharmacie):
     uniques.sort(key=lambda x: -x["score"])
 
     # Enrichissement contact sur les acteurs prioritaires :
-    # 1. OpenStreetMap (gratuit, toujours actif)
-    # 2. Google Places (optionnel, complète seulement ce qu'OSM n'a pas trouvé)
-    print("  Enrichissement contact (OpenStreetMap)...")
-    enrichir_contacts_openstreetmap(uniques)
+    # Google Places est utilisé seul pour l'enrichissement.
+    print("  Enrichissement contact (Google Places)...")
     enrichir_contacts_google_places(uniques)
 
     print(f"\n{len(uniques)} acteurs uniques identifiés.")
